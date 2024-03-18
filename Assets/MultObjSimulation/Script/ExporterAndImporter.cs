@@ -10,10 +10,7 @@ namespace ExporterImporter
 {
     public class ExporterAndImporter
     {
-        /////////////////
-        ///  Export   ///
-        /////////////////
-
+        // Export 
         private Vector3[] Position;
         private int[] Pair;
         private string filePath;
@@ -61,9 +58,7 @@ namespace ExporterImporter
         }
 
 
-        /// <summary>
-        /// ExportCollisionAmountToExcel
-        /// </summary>
+        // ExportCollisionAmountToExcel
         public void ExportCollisionAmountToExcel()
         {
             string objectPairs = GetObjectPairs();
@@ -100,10 +95,8 @@ namespace ExporterImporter
 
             Debug.Log("Data written to Excel file at: " + filePath);
         }
-
-        /////////////////
-        ///  Import   ///
-        /////////////////
+        
+        //  Import 
         public static List<List<string>> ReadCSVFile(string fileName)
         {
             List<List<string>> csvData = new List<List<string>>();

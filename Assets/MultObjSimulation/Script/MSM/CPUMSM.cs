@@ -34,7 +34,6 @@ public class CPUMSM : MonoBehaviour
     private Vector3[] Velocities;
     private Vector3[] Forces;
     private List<Triangle> triangles = new List<Triangle>();
-    
 
     private List<int> initTrianglePtr = new List<int>();
     private List<Triangle> initTriangle = new List<Triangle>();
@@ -47,12 +46,76 @@ public class CPUMSM : MonoBehaviour
     private Shader renderingShader;
     private Color matColor;
     private Material material;
-
-    
-
     private BoundingBox boudingBox;
     private BoundingBox floorBB;
 
+    
+    //private List<Vector3> posTriangle = new List<Vector3>();
+
+    public class Tris
+    {
+        public Vector3 vertex0, vertex1, vertex2; // �ﰢ���� ������
+        public Vector3 p_vertex0, p_vertex1, p_vertex2; // �ﰢ���� ���� ��ġ
+        public Vector3 vel0, vel1, vel2;
+
+        public Vector3 gravity = new Vector3(0.0f, -9.8f, 0.0f);
+        public float deltaTime = 0.01f;
+
+        public void update()
+        {
+            this.vel0 += this.gravity * this.deltaTime;
+            this.vertex0 += this.vel0 * this.deltaTime;
+
+            this.vel1 += this.gravity * this.deltaTime;
+            this.vertex1 += this.vel1 * this.deltaTime;
+
+            this.vel2 += this.gravity * this.deltaTime;
+            this.vertex2 += this.vel2 * this.deltaTime;
+        }
+
+        public void setZeroGravity()
+        {
+            this.gravity = Vector3.zero;
+        }
+
+        public void setInverseGravity()
+        {
+            this.gravity *= -1.0f;
+        }
+
+        public Vector3 getAverageVelocity()
+        {
+            return (this.vel0 + this.vel1 + this.vel2) / 3.0f;
+        }
+    }
+
+    private List<Tris> posTris;
+
+    public struct Tri
+    {
+        public Vector3 vertex0, vertex1, vertex2;
+    }
+    private Tri[] posTriangles;
+
+    public List<Tris> GetPosTris()
+    {
+        return posTris;
+    }
+
+    public Tri[] GetPosTriangles()
+    {
+        return posTriangles;
+    }
+
+   public int getNodeCount()
+    {
+        return nodeCount;
+    }
+
+     public int getTriCount()
+    {
+        return triCount;
+    }
 
     public void SetCollidableObj(GameObject[] CollidableObjects)
     {
@@ -100,14 +163,14 @@ public class CPUMSM : MonoBehaviour
         return nodeCount;
     }
 
-    public List<Triangle> GetTriCount()
-    {
-        return triangles;
-    }
-
     public Vector3[] GetPosition()
     {
         return Positions;
+    }
+
+    public int value()
+    {
+        return 1;
     }
 
     public void StartObj()
@@ -132,6 +195,8 @@ public class CPUMSM : MonoBehaviour
         material.SetMatrix("TRSMatrix", trs);
         material.SetMatrix("invTRSMatrix", trs.inverse);
 
+        posTriangles = new Tri[triCount];
+        posTris= new List<Tris>();
     }
 
     private void FindFloorMinMax()
@@ -173,7 +238,6 @@ public class CPUMSM : MonoBehaviour
         Velocities = new Vector3[nodeCount];
         Forces = new Vector3[nodeCount];
 
-
         Velocities.Initialize();
         Forces.Initialize();
 
@@ -211,19 +275,8 @@ public class CPUMSM : MonoBehaviour
         //print("springCounnt: " + springCount);
         //print("triCount: " + triCount);
 
-    }
-
-    private float calculateTriArea(Vector3 p1, Vector3 p2, Vector3 p3)
-    {
-        float area = 0.0f;
-        float term1, term2, term3;
-
-        term1 = (p2.y - p1.y) * (p3.z - p1.z) - (p2.z - p1.z) * (p3.y - p1.y);
-        term2 = (p2.x - p1.x) * (p3.z - p1.z) - (p2.z - p1.z) * (p3.x - p1.x);
-        term3 = (p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x);
-
-        area = 0.5f * Mathf.Sqrt(term1 * term1 + term2 * term2 + term3 * term3);
-        return area;
+        //   print(triArray.Length);
+        //   print(triangles.Count);
     }
 
     public void UpdateObj()
@@ -241,16 +294,12 @@ public class CPUMSM : MonoBehaviour
 
         Bounds bounds = new Bounds(Vector3.zero, Vector3.one * 10000);
 
-
         material.SetPass(0);
         Graphics.DrawProcedural(material, bounds, MeshTopology.Triangles, triArray.Length,
             1, null, null, ShadowCastingMode.On, true, gameObject.layer);
         if (Input.GetKey(KeyCode.Escape))
             UnityEditor.EditorApplication.isPlaying = false;
-
     }
-
-
 
 
     void UpdateNodes()
@@ -258,7 +307,6 @@ public class CPUMSM : MonoBehaviour
         //Euler method
         for (int i = 0; i < nodeCount; i++)
         {
-
             Vector3 pos = Positions[i];
             Vector3 vel = Velocities[i];
 
@@ -293,13 +341,28 @@ public class CPUMSM : MonoBehaviour
 
     void computeVertexNormal()
     {
+        posTris.Clear();
         for (int i = 0; i < triCount; i++)
         {
+            //posTris = new List<Tris>();
             Vector3 v1 = Positions[triArray[i * 3 + 0]];
             Vector3 v2 = Positions[triArray[i * 3 + 1]];
             Vector3 v3 = Positions[triArray[i * 3 + 2]];
 
             Vector3 N = (Vector3.Cross(v2 - v1, v3 - v1));
+
+            posTriangles[i].vertex0 = v1;
+            posTriangles[i].vertex1 = v2;
+            posTriangles[i].vertex2 = v3;
+
+            posTris.Add(new Tris
+            {
+                vertex0 = v1,
+                vertex1 = v2,
+                vertex2 = v3
+            });
+
+            //print( posTris[0].vertex0);
 
             vDataArray[triArray[i * 3 + 0]].norms += N;
             vDataArray[triArray[i * 3 + 1]].norms += N;
@@ -311,10 +374,19 @@ public class CPUMSM : MonoBehaviour
         }
     }
 
-
     private void OnDrawGizmos()
     {
-       
+        // for(int i =0; i< 10; i++)
+        // DrawTriangle(posTriangles[i], Color.red);
+    }
+
+
+    private void DrawTriangle(Tri triangle, Color color)
+    {
+        Gizmos.color = color;
+        Gizmos.DrawLine(triangle.vertex0, triangle.vertex1);
+        Gizmos.DrawLine(triangle.vertex1, triangle.vertex2);
+        Gizmos.DrawLine(triangle.vertex2, triangle.vertex0);
     }
 
     private void OnDestroy()

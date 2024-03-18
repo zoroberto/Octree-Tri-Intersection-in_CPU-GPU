@@ -20,14 +20,45 @@ struct OctreeData
     uint index;
 };
 
+struct Tri
+{
+    float3 vertex0;
+    float3 vertex1;
+    float3 vertex2;
+};
+
+struct Line {
+    float3 p0;
+    float3 p1;
+    
+    // float3 direction() {
+    //     return normalize(p1 - p0);
+    // }
+    
+    // float3 origin() {
+    //     return p0;
+    // }
+
+    float3 direction;
+    float3 origin;
+};
+
 // variable
 uint numberObj;
 uint nodeCount;
+uint triCount;
 uint objectIndex;
+
+float3 hitPoint;
+#define Epsilon 0.00001
 
 // Bind Positions
 RWStructuredBuffer<float3> positions;
 RWStructuredBuffer<float3> globalPositions;
+
+// Bind Tri-Position
+RWStructuredBuffer<Tri> posTriangles;
+RWStructuredBuffer<Tri> globalPosTriangles;
 
 // floor min and max
 RWStructuredBuffer<float3> floorPositions;
@@ -48,11 +79,15 @@ RWStructuredBuffer<OctreeData> bbOctree;
 RWStructuredBuffer<PairIndex> pairIndexL0;
 RWStructuredBuffer<PairIndex> pairIndexL1;
 RWStructuredBuffer<PairIndex> pairIndexL2;
-RWStructuredBuffer<uint> collisionPairResult;
-//RWStructuredBuffer<uint> rmCollisionPairResult;
+
 RWStructuredBuffer<uint> collisionResultL0;
 RWStructuredBuffer<uint> collisionResultL1;
 RWStructuredBuffer<uint> collisionResultL2;
+
+// Tri-Intersection
+RWStructuredBuffer<uint> collisionResultTri1;
+RWStructuredBuffer<uint> collisionResultTri2;
+RWStructuredBuffer<uint2> collisionResultTri;
 
 /////////////////////////////////////////////////
 //  Bind Global Positions kernel
@@ -67,6 +102,22 @@ void BindGlobalPositions(uint3 id : SV_DispatchThreadID)
     if (idx >= nodeCount) return;
 
     globalPositions[nodeCount * objectIndex + idx] = positions[idx];
+
+}
+
+/////////////////////////////////////////////////
+//  Bind Global Position Triangles kernel
+/////////////////////////////////////////////////
+#pragma kernel BindGlobalPosTriangles
+
+[numthreads(1024, 1, 1)]
+void BindGlobalPosTriangles(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+
+    if (idx >= triCount) return;
+
+    globalPosTriangles[triCount * objectIndex + idx] = posTriangles[idx];
 
 }
 
@@ -239,8 +290,6 @@ void CheckCollisionL0(uint3 id : SV_DispatchThreadID)
 
     OctreeData b1 = bbOctree[i1];
     OctreeData b2 = bbOctree[i2];
-    bbOctree[i1].index = i1; // update pair index of octree by i1
-    bbOctree[i2].index = i2; // update pair index of octree by i2
 
     // AABB collision detection
     bool collide =
@@ -251,15 +300,7 @@ void CheckCollisionL0(uint3 id : SV_DispatchThreadID)
         b1.min.z <= b2.max.z &&
         b1.max.z >= b2.min.z;
 
-
-    if (collide)
-    {
-        // update collisioin Pair Result by octree index
-        collisionPairResult[bbOctree[i1].index] = 1;
-        collisionPairResult[bbOctree[i2].index] = 1;
-    }
-
-    collisionResultL0[idx] = collide ? 1 : 0;
+    //collisionResultL0[idx] = collide ? 1 : 0;
 }
 
 /////////////////////////////////////////////////
@@ -439,4 +480,192 @@ void CheckCollisionL2(uint3 id : SV_DispatchThreadID)
         b1.min.z <= b2.max.z &&
         b1.max.z >= b2.min.z;
     collisionResultL2[idx] = collideLv0 ? 1 : 0;
+}
+
+
+
+
+
+///////////// Tri-Intersection function ////////////
+float3 ProjectPointOnPlane(float3 p, float3 planeNormal, float3 planePoint)
+{
+    float d = dot(planeNormal, (p - planePoint)) / length(planeNormal) ;
+    return p - d * planeNormal;
+}
+
+bool IsPointInsideTriangle(float3 p, Tri tri)
+{
+    float3 normal = normalize(cross(tri.vertex1 - tri.vertex0, tri.vertex2 - tri.vertex0));
+
+    // ���� �ﰢ�� ��鿡 ����
+    float3 projectedPoint = ProjectPointOnPlane(p, normal, tri.vertex0);
+
+    //if (distance(projectedPoint, p) > 0.1) return false;
+    if (distance(projectedPoint, p) > 0.01) return false;
+
+    // ������ ���� ���� ���� �Ǵ� ����
+    float3 edge1 = tri.vertex1 - tri.vertex0;
+    float3 vp1 = projectedPoint - tri.vertex0;
+    if (dot(cross(edge1, vp1), normal) < 0) return false;
+
+    float3 edge2 = tri.vertex2 - tri.vertex1;
+    float3 vp2 = projectedPoint - tri.vertex1;
+    if (dot(cross(edge2, vp2), normal) < 0) return false;
+
+    float3 edge3 = tri.vertex0 - tri.vertex2;
+    float3 vp3 = projectedPoint - tri.vertex2;
+    if (dot(cross(edge3, vp3), normal) < 0) return false;
+
+    return true; // ��� �˻縦 ����ߴٸ�, ������ ���� �ﰢ�� ���ο� �ֽ��ϴ�.
+}
+
+bool Intersect(Tri tri, Line ray, float3 hit)
+{
+    // Vectors from p1 to p2/p3 (edges)
+    //Find vectors for edges sharing vertex/point p1
+    float3 e1 = tri.vertex1 - tri.vertex0;
+    float3 e2 = tri.vertex2 - tri.vertex0;
+
+    ray.direction = normalize(ray.p1 - ray.p0);
+    float3 p = cross(ray.direction, e2);
+
+    //Calculate determinat
+    float det = dot(e1, p);
+
+    //if determinant is near zero, ray lies in plane of triangle otherwise not
+    //if (det > -Mathf.Epsilon && det < Mathf.Epsilon)
+    if (det > -Epsilon && det < Epsilon)
+    {
+        bool coplanar = IsPointInsideTriangle(ray.p0, tri);
+        bool coplanar2 = IsPointInsideTriangle(ray.p1, tri);
+
+        if (coplanar) hit = ray.p0;
+        if (coplanar2) hit = ray.p1;
+
+        return coplanar || coplanar2;
+    }
+    float invDet = 1.0f / det;
+
+    //calculate distance from p1 to ray origin
+    ray.origin = ray.p0;
+    float3 t = ray.origin - tri.vertex0;
+
+    //Calculate u parameter
+    float u = dot(t, p) * invDet;
+
+    //Check for ray hit
+    if (u < 0 || u > 1) { return false; }
+
+    //Prepare to test v parameter
+    float3 q = cross(t, e1);
+
+    //Calculate v parameter
+    float v = dot(ray.direction, q) * invDet;
+
+    //Check for ray hit
+    if (v < 0 || u + v > 1) { return false; }
+
+    // intersection point
+    hit = tri.vertex0 + u * e1 + v * e2;
+
+    if ((dot(e2, q) * invDet) > Epsilon)
+    {
+        //ray does intersect            
+        return true;
+    }
+
+    // No hit at all
+    return false;
+}
+
+bool CheckEdgeCollision(float3 vertex1, float3 vertex2, Tri t)
+{
+    //var edge = new Line();
+    // Instantiate a Line struct
+    Line edge;
+
+    edge.p0 = vertex1;
+    edge.p1 = vertex2;
+
+    return Intersect(t, edge,  hitPoint);
+}
+
+
+bool Detection(Tri t1, Tri t2)
+{
+    bool c1 = 
+    CheckEdgeCollision(t1.vertex0, t1.vertex1, t2) || 
+    CheckEdgeCollision(t1.vertex0, t1.vertex2, t2) || 
+    CheckEdgeCollision(t1.vertex1, t1.vertex2, t2);
+
+    bool c2 = 
+    CheckEdgeCollision(t2.vertex0, t2.vertex1, t1) || 
+    CheckEdgeCollision(t2.vertex0, t2.vertex2, t1) || 
+    CheckEdgeCollision(t2.vertex1, t2.vertex2, t1);
+
+    return c1 && c2;
+}
+
+
+///////////////////////////////////////////////////
+////  Tri-Intersection kernel
+///////////////////////////////////////////////////
+#pragma kernel TriIntersection
+
+[numthreads(32, 32, 1)]
+void TriIntersection(uint3 id : SV_DispatchThreadID)
+{
+   uint i = id.x;
+   uint j = id.y;
+
+   int objIndex1 = floor(float(i) / triCount);
+   int objIndex2 = floor(float(j) / triCount);
+   
+   if(objIndex1 != objIndex2 && objIndex1 >= objIndex2)
+   {
+        // check collision box of object, before check tri-intersection
+        for (int p = 0; p < pairIndexL0.Length; p++)
+        {
+            PairIndex pair = pairIndexL0[p];
+            uint i1 = pair.i1;
+            uint i2 = pair.i2;
+        
+            OctreeData b1 = bbOctree[i1];
+            OctreeData b2 = bbOctree[i2];
+        
+            // AABB collision detection
+            bool collide =
+                b1.min.x <= b2.max.x &&
+                b1.max.x >= b2.min.x &&
+                b1.min.y <= b2.max.y &&
+                b1.max.y >= b2.min.y &&
+                b1.min.z <= b2.max.z &&
+                b1.max.z >= b2.min.z;
+                collisionResultL0[p] = collide ? 1 : 0;
+        
+            if (collide)
+            {
+                Tri t1 = globalPosTriangles[i];
+                Tri t2 = globalPosTriangles[j];
+        
+                if(Detection(t1, t2))
+                {                    
+                    collisionResultTri1[i] = 1;
+                    collisionResultTri2[j] = 1;
+                }
+            }
+        }    
+   }
+}
+
+//////////////////////////////////////////////////
+////  Tri-Intersection kernel
+///////////////////////////////////////////////////
+#pragma kernel RemoveTriKernel
+
+[numthreads(1024, 1, 1)]
+void RemoveTriKernel(uint3 id : SV_DispatchThreadID)
+{
+   collisionResultTri1[id.x] = 0;
+   collisionResultTri2[id.x] = 0;
 }

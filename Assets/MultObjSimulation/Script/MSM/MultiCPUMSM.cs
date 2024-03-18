@@ -9,6 +9,7 @@ using UnityEngine.Rendering;
 using PBD;
 using Octree;
 using ExporterImporter;
+using UnityEngine.Video;
 
 public class MultiCPUMSM : MonoBehaviour
 {
@@ -18,8 +19,8 @@ public class MultiCPUMSM : MonoBehaviour
         Torus,
         Bunny,
         Armadillo,
+        Cube
     };
-
 
     [Header("Deformable model")]
     public int number_object = 1;
@@ -46,7 +47,6 @@ public class MultiCPUMSM : MonoBehaviour
     [Header("Geometric Parameters")]
     public bool useInteriorSpring = false;
 
-
     [Header("Collision")]
     public GameObject[] collidableObject;
 
@@ -62,18 +62,84 @@ public class MultiCPUMSM : MonoBehaviour
     [HideInInspector]
     private GameObject[] deformableObjectList;
     private CPUMSM[] deformableCPUMSM;
-   
     // octree
     private OctreeData[] custOctree;
-    private PairData[] pairIndexL0;
-    private PairData[] pairIndexL1;
-    private PairData[] pairIndexL2;
+    private List<PairData> pairIndexL0 = new List<PairData>();
+    private List<PairData> pairIndexL1 = new List<PairData>();
+    private List<PairData> pairIndexL2 = new List<PairData>();
     private readonly int octree_size = 73;
+    private OctreeData[] custBB;
     
     // collidable pair
     private readonly List<int> collidablePairIndexL0 = new List<int>();
     private readonly List<PairData> collidablePairIndexL1 = new List<PairData>();
     private readonly List<PairData> collidablePairIndexL2 = new List<PairData>();
+    private readonly List<Vector2Int> collidableTriIndex = new List<Vector2Int>();
+
+    private int triCount;
+
+    public class Tris
+    {
+        public Vector3 vertex0, vertex1, vertex2; // �ﰢ���� ������
+        public Vector3 p_vertex0, p_vertex1, p_vertex2; // �ﰢ���� ���� ��ġ
+        public Vector3 vel0, vel1, vel2;
+
+        public Vector3 gravity = new Vector3(0.0f, -9.8f, 0.0f);
+        public float deltaTime = 0.01f;
+
+        public void update()
+        {
+            this.vel0 += this.gravity * this.deltaTime;
+            this.vertex0 += this.vel0 * this.deltaTime;
+
+            this.vel1 += this.gravity * this.deltaTime;
+            this.vertex1 += this.vel1 * this.deltaTime;
+
+            this.vel2 += this.gravity * this.deltaTime;
+            this.vertex2 += this.vel2 * this.deltaTime;
+        }
+
+        public void setZeroGravity()
+        {
+            this.gravity = Vector3.zero;
+        }
+
+        public void setInverseGravity()
+        {
+            this.gravity *= -1.0f;
+        }
+
+        public Vector3 getAverageVelocity()
+        {
+            return (this.vel0 + this.vel1 + this.vel2) / 3.0f;
+        }
+    }
+
+     public class Line
+    {
+        public Vector3 p0, p1; // �ﰢ���� ������
+
+        public Vector3 direction
+        {
+            get { return (p1 - p0).normalized; }
+        }
+
+        public Vector3 origin
+        {
+            get { return p0; }
+        }
+    }
+
+    private List<Tris> posTriangle;
+
+    // public struct Tri
+    // {
+    //     public Vector3 vertex0, vertex1, vertex2;
+    // }
+    // private Tri[] posTriangles;
+
+    Vector3 hitPoint = new Vector3();
+    float separationDistance = 0.05f;
 
     void SelectModelName()
     {
@@ -83,45 +149,30 @@ public class MultiCPUMSM : MonoBehaviour
             case MyModel.Torus: modelName = "torus.1"; break;
             case MyModel.Bunny: modelName = "bunny.1"; break;
             case MyModel.Armadillo: modelName = "Armadillo.1"; break;
+            case MyModel.Cube: modelName = "33cube.1"; break;
         }
     }
 
-    void Start()
+    void Awake()
     {
         SelectModelName();
         addDeformableObjectList();
         AddOctreePairIndex();
     }
 
-
     void addDeformableObjectList()
     {
         deformableObjectList = new GameObject[number_object];
-        HashSet<Vector3> generatedPositions = new HashSet<Vector3>();
         deformableCPUMSM = new CPUMSM[number_object];
         custOctree = new OctreeData[number_object * octree_size];
 
         List<List<string>> csvData = ExporterAndImporter.ReadCSVFile(csv_file);
         Vector3 position = new Vector3();
 
-
         for (int i = 0; i < number_object; i++)
         {
             deformableObjectList[i] = new GameObject("Deformable Object " + i);
-            deformableObjectList[i].transform.SetParent(this.transform);
-
-            ////set position of the object 1). randomize 2).set the coord
-            //Vector3 randomPosition;
-
-            //do
-            //{
-            //    // Generate random position within the specified range
-            //    float x = UnityEngine.Random.Range(rangeMin.x, rangeMax.x);
-            //    float y = UnityEngine.Random.Range(rangeMin.y, rangeMax.y);
-            //    float z = UnityEngine.Random.Range(rangeMin.z, rangeMax.z);
-            //    randomPosition = new Vector3(x, y, z);
-            //} while (generatedPositions.Contains(randomPosition));
-            //deformableObjectList[i].transform.position = randomPosition;
+            deformableObjectList[i].transform.SetParent(transform);
 
             List<string> row = csvData[i];
             for (int j = 1; j < row.Count; j++)
@@ -157,11 +208,13 @@ public class MultiCPUMSM : MonoBehaviour
                 deformableCPUMSM[i] = cpumsmScript;
                 deformableCPUMSM[i].StartObj();
 
-
+                triCount = deformableCPUMSM[i].getTriCount();
             }
+
+            //posTriangles = new Tri[triCount * number_object];
+            posTriangle = new List<Tris>();
         }
     }
-
 
     int calculateStartIndex(int object_index, int level)
     {
@@ -179,11 +232,9 @@ public class MultiCPUMSM : MonoBehaviour
 
     private void AddOctreePairIndex()
     {
-        // index pair
-        List<PairIndex> indexPairsL0 = new List<PairIndex>();
-        List<PairIndex> indexPairsL1 = new List<PairIndex>();
-        List<PairIndex> indexPairsL2 = new List<PairIndex>();
-
+        pairIndexL0.Clear();
+        pairIndexL1.Clear();
+        pairIndexL2.Clear();
         for(int i = 0; i < number_object; i++)
         {
             var l0_st_idx = calculateStartIndex(i, 0);
@@ -212,89 +263,71 @@ public class MultiCPUMSM : MonoBehaviour
                 {
                     for (int m = j_l0_st_idx; m <= j_l0_end_idx; m++)
                     {
-                        List<int> indices = new List<int>();
-                        indices.Add(n);
-                        indices.Add(m);
-                        PairIndex pair = new PairIndex(indices);
-                        indexPairsL0.Add(pair);
+                        pairIndexL0.Add( new PairData
+                        {
+                            i1 = n,
+                            i2 = m
+                        });
+                        
                     }
                 }
                 for (int n = l1_st_idx; n <= l1_end_idx; n++)
                 {
                     for (int m = j_l1_st_idx; m <= j_l1_end_idx; m++)
                     {
-
-                        List<int> indices = new List<int>();
-                        indices.Add(n);
-                        indices.Add(m);
-                        PairIndex pair = new PairIndex(indices);
-                        indexPairsL1.Add(pair);
+                        pairIndexL1.Add(new PairData
+                        {
+                            i1 = n,
+                            i2 = m,
+                        });
                     }
                 }
                 for (int n = l2_st_idx; n < l2_end_idx; n++)
                 {
                     for (int m = j_l2_st_idx; m < j_l2_end_idx; m++)
                     {
-                        List<int> indices = new List<int>();
-                        indices.Add(n);
-                        indices.Add(m);
-                        PairIndex pair = new PairIndex(indices);
-                        indexPairsL2.Add(pair);
-
+                      
+                        pairIndexL2.Add(new PairData
+                        {
+                            i1 = n,
+                            i2 = m,
+                        });
                     }
                 }
             }
         }
-
-        UpdatePairIndexData(indexPairsL0, indexPairsL1, indexPairsL2);
     }
 
-    // Update pair array
-    private void UpdatePairIndexData(List<PairIndex> pairIdxL0, List<PairIndex> pairIdxL1, List<PairIndex> pairIdxL2)
+    
+    void UpdatePosition()
     {
-        pairIndexL0 = new PairData[pairIdxL0.Count];
-        for (int i = 0; i < pairIdxL0.Count; i++)
+        for (int i = 0; i < posTriangle.Count; i++)
         {
-            pairIndexL0[i] = new PairData
-            {
-                i1 = pairIdxL0[i].index[0],
-                i2 = pairIdxL0[i].index[1]
-            };
-        }
-
-        pairIndexL1 = new PairData[pairIdxL1.Count];
-        for (int i = 0; i < pairIdxL1.Count; i++)
-        {
-            pairIndexL1[i] = new PairData
-            {
-                i1 = pairIdxL1[i].index[0],
-                i2 = pairIdxL1[i].index[1]
-            };
-        }
-
-        pairIndexL2 = new PairData[pairIdxL2.Count];
-        for (int i = 0; i < pairIdxL2.Count; i++)
-        {
-            pairIndexL2[i] = new PairData
-            {
-                i1 = pairIdxL2[i].index[0],
-                i2 = pairIdxL2[i].index[1]
-            };
+            posTriangle[i].update();
         }
     }
 
     private void Update()
     {
-        ImplementOctree();
-        CheckCollisionOctreeLv0();
-        CheckCollisionOctreeLv1();
-        CheckCollisionOctreeLv2();
+        custBB = new OctreeData[number_object];
+        posTriangle.Clear();
+        for (int i = 0; i < number_object; i++)
+        {
+            ImplementOctree(i);
+            AddTriangles(i);
+        }
+        
+        // CheckCollisionOctreeLv0();
+        // CheckCollisionOctreeLv1();
+        // CheckCollisionOctreeLv2();
+
+        CheckTriIntersection();
     }
 
-    private void ImplementOctree() 
+    private void ImplementOctree(int i) 
     {
-        OctreeData[] custBB = new OctreeData[number_object];
-        for (int i = 0; i < number_object; i++)
+        // OctreeData[] custBB = new OctreeData[number_object];
+        // for (int i = 0; i < number_object; i++)
         {
             deformableCPUMSM[i].UpdateObj();
             Vector3[] position = deformableCPUMSM[i].GetPosition();
@@ -403,7 +436,7 @@ public class MultiCPUMSM : MonoBehaviour
     private void CheckCollisionOctreeLv0()
     {
         collidablePairIndexL0.Clear();
-        for (int i = 0; i < pairIndexL0.Length; i++)
+        for (int i = 0; i < pairIndexL0.Count; i++)
         {
             if (Intersection.AABB(custOctree[pairIndexL0[i].i1].min, custOctree[pairIndexL0[i].i1].max,
             custOctree[pairIndexL0[i].i2].min, custOctree[pairIndexL0[i].i2].max))
@@ -423,7 +456,7 @@ public class MultiCPUMSM : MonoBehaviour
     private void CheckCollisionOctreeLv1()
     {
         collidablePairIndexL1.Clear();
-        for (int i = 0; i < pairIndexL1.Length; i++)
+        for (int i = 0; i < pairIndexL1.Count; i++)
         {
             int l0_index_obj1 = (int)Mathf.Floor(pairIndexL1[i].i1 / octree_size) * octree_size;
             int l0_index_obj2 = (int)Mathf.Floor(pairIndexL1[i].i2 / octree_size) * octree_size;
@@ -440,9 +473,6 @@ public class MultiCPUMSM : MonoBehaviour
                         if (!collidablePairIndexL1.Any(c => c.Equals(pairIndexL1[i])))
                             collidablePairIndexL1.Add(pairIndexL1[i]);
                     }
-
-
-
                 }
             }
         }
@@ -471,7 +501,7 @@ public class MultiCPUMSM : MonoBehaviour
     {
 
         collidablePairIndexL2.Clear();
-        for (int i = 0; i < pairIndexL2.Length; i++)
+        for (int i = 0; i < pairIndexL2.Count; i++)
         {
             int l0_index_obj1 = calcIndexObjectLevel0(pairIndexL2[i].i1);
             int l0_index_obj2 = calcIndexObjectLevel0(pairIndexL2[i].i2);
@@ -498,7 +528,275 @@ public class MultiCPUMSM : MonoBehaviour
                 }
             }
         }
+    }
 
+    private void AddTriangles(int i)
+    {
+        var posTri = deformableCPUMSM[i].GetPosTriangles();
+        for(int j=0; j< triCount; j++)
+        {
+            posTriangle.Add(new Tris
+            {
+                vertex0 = posTri[j].vertex0,
+                vertex1 = posTri[j].vertex1,
+                vertex2 = posTri[j].vertex2
+            });
+        }
+    }
+
+    private void CheckTriIntersection() 
+    {
+        collidableTriIndex.Clear();
+        for(int i =0; i< number_object * triCount;i++)
+        {
+            for(int j =0; j< number_object * triCount;j++)
+            {
+                int objIndex1 = (int)Mathf.Floor(i/triCount);
+                int objIndex2 = (int)Mathf.Floor(j/triCount);
+               
+                if(objIndex1 != objIndex2 && objIndex1 >= objIndex2)
+                {
+                    collidablePairIndexL0.Clear();
+                    for (int p = 0; p < pairIndexL0.Count; p++)
+                    {
+                        // check collision box of object, before check tri-intersection
+                        if (Intersection.AABB(custOctree[pairIndexL0[p].i1].min, custOctree[pairIndexL0[p].i1].max,
+                        custOctree[pairIndexL0[p].i2].min, custOctree[pairIndexL0[p].i2].max))
+                        {                               
+                            if (debugModeLv0)
+                            {
+                                if (!collidablePairIndexL0.Contains(pairIndexL0[p].i1))
+                                    collidablePairIndexL0.Add(pairIndexL0[p].i1);
+
+                                if (!collidablePairIndexL0.Contains(pairIndexL0[p].i2))
+                                    collidablePairIndexL0.Add(pairIndexL0[p].i2);
+                            }
+
+
+                            var t1 = posTriangle[i];
+                            var t2 = posTriangle[j];
+
+                            if (Detection(t1, t2))
+                            {                   
+                                Vector2Int pair = new Vector2Int(i, j);
+                                if(!collidableTriIndex.Contains(pair)){
+                                    collidableTriIndex.Add(pair); 
+                                }
+
+                                
+                                // // �浹 ������ �ﰢ���� �� ���� ���� ����� �̿��Ͽ� �̵� ���� ���
+                                // Vector3 collisionPoint = hitPoint; // �浹 ����
+
+                                // // �浹 ������ ���� ����� ������ ã��
+                                // {
+                                //     Vector3 closestVertex = FindClosestVertex(t1, collisionPoint);
+                                //     Vector3 averageVel = t1.getAverageVelocity();
+
+                                //     Vector3 separationVector = (closestVertex - collisionPoint).normalized * separationDistance;
+                                //     if (Vector3.Distance(averageVel, Vector3.zero) > 0.00001)
+                                //     {
+                                //         //// �̵� ���͸� ����Ͽ� �浹�� �߻��� ������ �浹 �������� �̵���Ŵ
+                                //         if (closestVertex == t1.vertex0)
+                                //         {
+                                //             t1.vertex0 -= (t1.vel0 * t1.deltaTime) + separationVector;
+                                //             t1.vel0 *= -1.0f;
+                                //         }
+                                //         else if (closestVertex == t1.vertex1)
+                                //         {
+                                //             t1.vertex1 -= (t1.vel1 * t1.deltaTime) + separationVector;
+                                //             t1.vel1 *= -1.0f;
+                                //         }
+                                //         else if (closestVertex == t1.vertex2)
+                                //         {
+                                //             t1.vertex2 -= (t1.vel2 * t1.deltaTime) + separationVector;
+                                //             t1.vel2 *= -1.0f;
+                                //         }
+                                //     }
+                                // }
+                                // {
+                                //     Vector3 closestVertex = FindClosestVertex(t2, collisionPoint);
+                                //     Vector3 averageVel = t2.getAverageVelocity();
+
+                                //     if (Vector3.Distance(averageVel, Vector3.zero) > 0.00001)
+                                //     {
+                                //         Vector3 separationVector = (closestVertex - collisionPoint).normalized * separationDistance;
+
+                                //         //// �̵� ���͸� ����Ͽ� �浹�� �߻��� ������ �浹 �������� �̵���Ŵ
+                                //         if (closestVertex == t2.vertex0)
+                                //         {
+                                //             t2.vertex0 -= (t2.vel0 * t2.deltaTime * 2.0f) + separationVector;
+                                //             t2.vel0 *= -1.0f;
+                                //         }
+                                //         else if (closestVertex == t2.vertex1)
+                                //         {
+                                //             t2.vertex1 -= (t2.vel1 * t2.deltaTime * 2.0f) + separationVector;
+                                //             t2.vel1 *= -1.0f;
+                                //         }
+                                //         else if (closestVertex == t2.vertex2)
+                                //         {
+                                //             t2.vertex2 -= (t2.vel2 * t2.deltaTime * 2.0f) + separationVector;
+                                //             t2.vel2 *= -1.0f;
+                                //         }
+                                //     }
+                                // }
+                                // posTriangle[i] = t1;
+                                // posTriangle[j] = t2;
+                            }
+                            //UpdatePosition();
+                        }
+                    }                        
+                    
+                }
+            }
+        }  
+    }
+
+    bool Detection(Tris t1, Tris t2)
+    {
+        var c1 = CheckEdgeCollision(t1.vertex0, t1.vertex1, t2) || 
+        CheckEdgeCollision(t1.vertex0, t1.vertex2, t2) || 
+        CheckEdgeCollision(t1.vertex1, t1.vertex2, t2);
+
+        var c2 = CheckEdgeCollision(t2.vertex0, t2.vertex1, t1) || 
+        CheckEdgeCollision(t2.vertex0, t2.vertex2, t1) || 
+        CheckEdgeCollision(t2.vertex1, t2.vertex2, t1);
+
+        return c1 && c2;
+    }
+
+
+    Vector3 ProjectPointOnPlane(Vector3 point, Vector3 planeNormal, Vector3 planePoint)
+    {
+        float d = Vector3.Dot(planeNormal, (point - planePoint)) / planeNormal.magnitude;
+        return point - d * planeNormal;
+    }
+
+
+    bool IsPointInsideTriangle(Vector3 point, Tris triangle)
+    {
+         Vector3 normal = Vector3.Cross(triangle.vertex1 - triangle.vertex0, triangle.vertex2 - triangle.vertex0).normalized;
+
+        // ���� �ﰢ�� ��鿡 ����
+        Vector3 projectedPoint = ProjectPointOnPlane(point, normal, triangle.vertex0);
+
+        if (Vector3.Distance(projectedPoint, point) > 0.1) return false;
+
+        //Debug.Log(Vector3.Distance(projectedPoint, point));
+
+        // ������ ���� ���� ���� �Ǵ� ����
+        Vector3 edge1 = triangle.vertex1 - triangle.vertex0;
+        Vector3 vp1 = projectedPoint - triangle.vertex0;
+        if (Vector3.Dot(Vector3.Cross(edge1, vp1), normal) < 0) return false;
+
+        Vector3 edge2 = triangle.vertex2 - triangle.vertex1;
+        Vector3 vp2 = projectedPoint - triangle.vertex1;
+        if (Vector3.Dot(Vector3.Cross(edge2, vp2), normal) < 0) return false;
+
+        Vector3 edge3 = triangle.vertex0 - triangle.vertex2;
+        Vector3 vp3 = projectedPoint - triangle.vertex2;
+        if (Vector3.Dot(Vector3.Cross(edge3, vp3), normal) < 0) return false;
+
+        return true; // ��� �˻縦 ����ߴٸ�, ������ ���� �ﰢ�� ���ο� �ֽ��ϴ�.
+    }
+
+    Vector3 FindClosestVertex(Tris triangle, Vector3 point)
+    {
+        float minDistance = Mathf.Infinity;
+        Vector3 closestVertex = Vector3.zero;
+
+        float distance0 = Vector3.Distance(triangle.vertex0, point);
+        float distance1 = Vector3.Distance(triangle.vertex1, point);
+        float distance2 = Vector3.Distance(triangle.vertex2, point);
+
+        if (distance0 < minDistance)
+        {
+            minDistance = distance0;
+            closestVertex = triangle.vertex0;
+        }
+        if (distance1 < minDistance)
+        {
+            minDistance = distance1;
+            closestVertex = triangle.vertex1;
+        }
+        if (distance2 < minDistance)
+        {
+            minDistance = distance2;
+            closestVertex = triangle.vertex2;
+        }
+
+        return closestVertex;
+    }
+
+    bool checkPointCollision(Vector3 p, Tris triangle)
+    {
+        return IsPointInsideTriangle(p, triangle);
+    }
+
+    bool CheckEdgeCollision(Vector3 vertex1, Vector3 vertex2, Tris t)
+    {
+        var edge = new Line();
+
+        edge.p0 = vertex1;
+        edge.p1 = vertex2;
+
+        return Intersect(t, edge, ref hitPoint);
+    }
+
+    public bool Intersect(Tris triangle, Line ray, ref Vector3 hit)
+    {
+        // Vectors from p1 to p2/p3 (edges)
+        //Find vectors for edges sharing vertex/point p1
+        Vector3 e1 = triangle.vertex1 - triangle.vertex0;
+        Vector3 e2 = triangle.vertex2 - triangle.vertex0;
+
+        // Calculate determinant
+        Vector3 p = Vector3.Cross(ray.direction, e2);
+
+        //Calculate determinat
+        float det = Vector3.Dot(e1, p);
+
+        //if determinant is near zero, ray lies in plane of triangle otherwise not
+        if (det > -Mathf.Epsilon && det < Mathf.Epsilon)
+        {
+            var coplanar = IsPointInsideTriangle(ray.p0, triangle);
+            var coplanar2 = IsPointInsideTriangle(ray.p1, triangle);
+
+            if (coplanar) hit = ray.p0;
+            if (coplanar2) hit = ray.p1;
+
+            return coplanar || coplanar2;
+        }
+        float invDet = 1.0f / det;
+
+        //calculate distance from p1 to ray origin
+        Vector3 t = ray.origin - triangle.vertex0;
+
+        //Calculate u parameter
+        float u = Vector3.Dot(t, p) * invDet;
+
+        //Check for ray hit
+        if (u < 0 || u > 1) { return false; }
+
+        //Prepare to test v parameter
+        Vector3 q = Vector3.Cross(t, e1);
+
+        //Calculate v parameter
+        float v = Vector3.Dot(ray.direction, q) * invDet;
+
+        //Check for ray hit
+        if (v < 0 || u + v > 1) { return false; }
+
+        // intersection point
+        hit = triangle.vertex0 + u * e1 + v * e2;
+
+        if ((Vector3.Dot(e2, q) * invDet) > Mathf.Epsilon)
+        {
+            //ray does intersect            
+            return true;
+        }
+
+        // No hit at all
+        return false;
     }
 
     private void OnGUI()
@@ -512,7 +810,6 @@ public class MultiCPUMSM : MonoBehaviour
 
         string text = string.Format("num. Obj :: " + number_object);
         GUI.Label(rect, text, style);
-
     }
 
 
@@ -539,7 +836,6 @@ public class MultiCPUMSM : MonoBehaviour
                     Gizmos.color = Color.green;
                     for (int j = 0; j < collidablePairIndexL1.Count; j++)
                     {
-                        
                         if (i == collidablePairIndexL1[j].i1)
                         {
                             Vector3 size = custOctree[collidablePairIndexL1[j].i1].max - custOctree[collidablePairIndexL1[j].i1].min;
@@ -573,6 +869,27 @@ public class MultiCPUMSM : MonoBehaviour
                 }
             }
         }
+
+        if (collidableTriIndex != null)
+        {
+            List<int> newList = new List<int>();
+            for(int i =0; i< collidableTriIndex.Count; i++){
+                if(!newList.Contains(collidableTriIndex[i].x)) newList.Add(collidableTriIndex[i].x);
+                if(!newList.Contains(collidableTriIndex[i].y)) newList.Add(collidableTriIndex[i].y);
+            }
+
+            for(int i =0; i< newList.Count; i++)
+            {
+                DrawTriangle(posTriangle[newList[i]], Color.green);
+            }
+        }
     }
 
+     private void DrawTriangle(Tris triangle, Color color)
+    {
+        Gizmos.color = color;
+        Gizmos.DrawLine(triangle.vertex0, triangle.vertex1);
+        Gizmos.DrawLine(triangle.vertex1, triangle.vertex2);
+        Gizmos.DrawLine(triangle.vertex2, triangle.vertex0);
+    }
 }

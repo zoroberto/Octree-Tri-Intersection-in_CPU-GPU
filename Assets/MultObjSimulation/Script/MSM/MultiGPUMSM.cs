@@ -9,6 +9,7 @@ using UnityEngine.Rendering;
 using PBD;
 using Octree;
 using ExporterImporter;
+using UnityEngine.UIElements;
 
 public class MultiGPUMSM : MonoBehaviour
 {
@@ -18,6 +19,7 @@ public class MultiGPUMSM : MonoBehaviour
         Torus,
         Bunny,
         Armadillo,
+        Cube
     };
 
 
@@ -68,49 +70,67 @@ public class MultiGPUMSM : MonoBehaviour
     public bool debugModeL0 = true;
     public bool debugModeL1 = true;
     public bool debugModeL2 = true;
+    public bool debugModeTriangle = true;
    
 
     private Vector2Int[] indicies;
     private int nodeCount;
+    private int triCount;
 
     private readonly int octree_size = 73;
 
     // kernel IDs
     private int bindPositionsKernel;
+    private int bindPosTrianglesKernel;
     private int findBBMinMaxKernel;
     private int implementOctreeKernel;
     private int checkCollisionL0Kernel;
     private int checkCollisionL1Kernel;
     private int checkCollisionL2Kernel;
+    private int TriIntersectionKernel;
+    private int RemoveTriKernel;
 
     // Compute Buffer
     private ComputeBuffer positionsBuffer;
     private ComputeBuffer globalPositionsBuffer;
+    private ComputeBuffer posTrianglesBuffer;
+    private ComputeBuffer globalPosTrianglesBuffer;
     private ComputeBuffer bbMinMaxBuffer;
     private ComputeBuffer rangeObjIndexBuffer;
     private ComputeBuffer bbOctreeBuffer;
-    private ComputeBuffer collisionPairBuffer;
     private ComputeBuffer pairIndexL0Buffer;
     private ComputeBuffer pairIndexL1Buffer;
     private ComputeBuffer pairIndexL2Buffer;
     private ComputeBuffer collisionResultsL0Buffer;
     private ComputeBuffer collisionResultsL1Buffer;
     private ComputeBuffer collisionResultsL2Buffer;
+    private ComputeBuffer collisionResultTri1Buffer;
+    private ComputeBuffer collisionResultTri2Buffer;
+    private ComputeBuffer collisionResultTriBuffer;
     // data
     private OctreeData[] bbOctree;
-    private PairData[] pairIndexL0;
-    private PairData[] pairIndexL1;
-    private PairData[] pairIndexL2;
+    
+    private List<PairData> pairIndexL0 = new List<PairData>();
+    private List<PairData> pairIndexL1 = new List<PairData>();
+    private List<PairData> pairIndexL2 = new List<PairData>();
+   
+    private struct Tri
+    {
+        public Vector3 vertex0, vertex1, vertex2;
+    }
+    private Tri[] posTriangles;
 
     // collision pair
     private List<int> collidablePairIndexL0 = new List<int>();
     private List<int> collidablePairIndexL1 = new List<int>();
     private List<int> collidablePairIndexL2 = new List<int>();
     
-    private int[] collisionPairResults;
     private int[] collisionresultsL0;
     private int[] collisionresultsL1;
     private int[] collisionresultsL2;
+    private int[] collisionresultsTri1;
+    private int[] collisionresultsTri2;
+    private int[] collisionresultsTri;
 
     void Start()
     {
@@ -132,7 +152,10 @@ public class MultiGPUMSM : MonoBehaviour
             case MyModel.Torus: modelName = "torus.1"; break;
             case MyModel.Bunny: modelName = "bunny.1"; break;
             case MyModel.Armadillo: modelName = "Armadillo.1"; break;
+            case MyModel.Cube: modelName = "33cube.1"; break;
         }
+
+        
     }
     void addDeformableObjectList()
     {
@@ -200,6 +223,7 @@ public class MultiGPUMSM : MonoBehaviour
                 deformableGPUMSM[i].StartObj();
 
                 nodeCount = deformableGPUMSM[i].getNodeCount();
+                triCount = deformableGPUMSM[i].getTriCount();
 
                 indicies[i] = new Vector2Int(st_index, st_index + nodeCount);
                 st_index += nodeCount;
@@ -224,11 +248,6 @@ public class MultiGPUMSM : MonoBehaviour
 
     private void AddOctreePairIndex()
     {
-        // index pair
-        List<PairIndex> indexPairsL0 = new List<PairIndex>();
-        List<PairIndex> indexPairsL1 = new List<PairIndex>();
-        List<PairIndex> indexPairsL2 = new List<PairIndex>();
-
         for (int i = 0; i < number_object; i++)
         {
             var l0_st_idx = calculateStartIndex(i, 0);
@@ -257,132 +276,120 @@ public class MultiGPUMSM : MonoBehaviour
                 {
                     for (int m = j_l0_st_idx; m <= j_l0_end_idx; m++)
                     {
-                        List<int> indices = new List<int>();
-                        indices.Add(n);
-                        indices.Add(m);
-                        PairIndex pair = new PairIndex(indices);
-                        indexPairsL0.Add(pair);
-                        //pair_datas.Add("pair : " + n.ToString() + ":" + m.ToString());
+                        pairIndexL0.Add(new PairData
+                        {
+                            i1 = m,
+                            i2 = n
+                        });
                     }
                 }
                 for (int n = l1_st_idx; n <= l1_end_idx; n++)
                 {
                     for (int m = j_l1_st_idx; m <= j_l1_end_idx; m++)
                     {
-                        //pair_datas.Add("pair : " + n.ToString() + ":" + m.ToString());
-
-                        List<int> indices = new List<int>();
-                        indices.Add(n);
-                        indices.Add(m);
-                        PairIndex pair = new PairIndex(indices);
-                        indexPairsL1.Add(pair);
-
-                        //print($" m n {m} {n}");
+                        pairIndexL1.Add(new PairData
+                        {
+                            i1 = m,
+                            i2 = n
+                        });
                     }
                 }
                 for (int n = l2_st_idx; n < l2_end_idx; n++)
                 {
                     for (int m = j_l2_st_idx; m < j_l2_end_idx; m++)
                     {
-                        List<int> indices = new List<int>();
-                        indices.Add(n);
-                        indices.Add(m);
-                        PairIndex pair = new PairIndex(indices);
-                        indexPairsL2.Add(pair);
-
-                        //pair_datas.Add("pair : " + n.ToString() + ":" + m.ToString());
+                       
+                        pairIndexL2.Add(new PairData
+                        {
+                            i1 = m,
+                            i2 = n
+                        });
                     }
                 }
+
+                
             }
         }
 
-        UpdatePairIndexData(indexPairsL0, indexPairsL1, indexPairsL2);
-    }
-
-    // Update pair array
-    private void UpdatePairIndexData(List<PairIndex> pairIdxL0, List<PairIndex> pairIdxL1, List<PairIndex> pairIdxL2)
-    {
-        pairIndexL0 = new PairData[pairIdxL0.Count];
-        for (int i = 0; i < pairIdxL0.Count; i++)
-        {
-            pairIndexL0[i] = new PairData
-            {
-                i1 = pairIdxL0[i].index[0],
-                i2 = pairIdxL0[i].index[1]
-            };
-        }
-
-        
-        pairIndexL1 = new PairData[pairIdxL1.Count];
-        for (int i = 0; i < pairIdxL1.Count; i++)
-        {
-            pairIndexL1[i] = new PairData
-            {
-                i1 = pairIdxL1[i].index[0],
-                i2 = pairIdxL1[i].index[1]
-            };
-        }
-
-        pairIndexL2 = new PairData[pairIdxL2.Count];
-        for (int i = 0; i < pairIdxL2.Count; i++)
-        {
-            pairIndexL2[i] = new PairData
-            {
-                i1 = pairIdxL2[i].index[0],
-                i2 = pairIdxL2[i].index[1]
-            };
-        }
+       
     }
 
     private void FindKernelIDs()
     {
         bindPositionsKernel = OctreeAabbCS.FindKernel("BindGlobalPositions");
+        bindPosTrianglesKernel = OctreeAabbCS.FindKernel("BindGlobalPosTriangles");
         findBBMinMaxKernel = OctreeAabbCS.FindKernel("FindBBMinMax");
 
         implementOctreeKernel = OctreeAabbCS.FindKernel("ImplementOctree");
         checkCollisionL0Kernel = OctreeAabbCS.FindKernel("CheckCollisionL0");
         checkCollisionL1Kernel = OctreeAabbCS.FindKernel("CheckCollisionL1");
         checkCollisionL2Kernel = OctreeAabbCS.FindKernel("CheckCollisionL2");
+        TriIntersectionKernel = OctreeAabbCS.FindKernel("TriIntersection");
+        RemoveTriKernel = OctreeAabbCS.FindKernel("RemoveTriKernel");
+
     }
 
     private void SetupComputeBuffer()
     {
-        collisionresultsL0 = new int[pairIndexL0.Length];
-        collisionresultsL1 = new int[pairIndexL1.Length];
-        collisionresultsL2 = new int[pairIndexL2.Length];
-        collisionPairResults = new int[number_object * octree_size];
+        
+       
+        collisionresultsL0 = new int[pairIndexL0.Count];
+        collisionresultsL1 = new int[pairIndexL1.Count];
+        collisionresultsL2 = new int[pairIndexL2.Count];
+        collisionresultsTri1 = new int[number_object * triCount];
+        collisionresultsTri2 = new int[number_object * triCount];
+        collisionresultsTri = new int[number_object * triCount];
 
         globalPositionsBuffer = new ComputeBuffer(nodeCount * number_object, sizeof(float) * 3);
         positionsBuffer = new ComputeBuffer(nodeCount, sizeof(float) * 3);
+        posTrianglesBuffer = new ComputeBuffer(triCount, sizeof(float) * 9);
+        globalPosTrianglesBuffer = new ComputeBuffer(triCount * number_object, sizeof(float) * 9);
+        
         bbMinMaxBuffer = new ComputeBuffer(number_object, sizeof(float) * 6);
 
         rangeObjIndexBuffer = new ComputeBuffer(number_object, sizeof(int) * 2);
         bbOctreeBuffer = new ComputeBuffer(number_object * octree_size, sizeof(float) * 13);
 
-        pairIndexL0Buffer = new ComputeBuffer(pairIndexL0.Length, sizeof(int) * 2);
-        pairIndexL1Buffer = new ComputeBuffer(pairIndexL1.Length, sizeof(int) * 2);
-        pairIndexL2Buffer = new ComputeBuffer(pairIndexL2.Length, sizeof(int) * 2);
-        collisionResultsL0Buffer = new ComputeBuffer(pairIndexL0.Length, sizeof(int));
-        collisionResultsL1Buffer = new ComputeBuffer(pairIndexL1.Length, sizeof(int));
-        collisionResultsL2Buffer = new ComputeBuffer(pairIndexL2.Length, sizeof(int));
-        collisionPairBuffer = new ComputeBuffer(number_object * octree_size, sizeof(int));
+        pairIndexL0Buffer = new ComputeBuffer(pairIndexL0.Count, sizeof(int) * 2);
+        pairIndexL1Buffer = new ComputeBuffer(pairIndexL1.Count, sizeof(int) * 2);
+        pairIndexL2Buffer = new ComputeBuffer(pairIndexL2.Count, sizeof(int) * 2);
+
+        collisionResultsL0Buffer = new ComputeBuffer(pairIndexL0.Count, sizeof(int));
+        collisionResultsL1Buffer = new ComputeBuffer(pairIndexL1.Count, sizeof(int));
+        collisionResultsL2Buffer = new ComputeBuffer(pairIndexL2.Count, sizeof(int));
+        collisionResultTri1Buffer = new ComputeBuffer(number_object * triCount, sizeof(int));
+        collisionResultTri2Buffer = new ComputeBuffer(number_object * triCount, sizeof(int));
+        collisionResultTriBuffer = new ComputeBuffer(number_object * triCount, sizeof(int) * 2);
     }
 
     private void SetupComputeShader()
     {
         bbOctree = new OctreeData[number_object * octree_size];
-        
+        posTriangles = new Tri[number_object * triCount];
 
         OctreeAabbCS.SetInt("numberObj", number_object);
         OctreeAabbCS.SetInt("nodeCount", nodeCount);
+        OctreeAabbCS.SetInt("triCount", triCount);
 
         rangeObjIndexBuffer.SetData(indicies);
         pairIndexL0Buffer.SetData(pairIndexL0);
         pairIndexL1Buffer.SetData(pairIndexL1);
         pairIndexL2Buffer.SetData(pairIndexL2);
+        collisionresultsTri1.Initialize();
+        collisionresultsTri2.Initialize();
+
+        Tri[] globalPos =  new Tri[number_object * triCount];
+        globalPos.Initialize();
+        globalPosTrianglesBuffer.SetData(globalPos);
+        collisionResultTri1Buffer.SetData(collisionresultsTri1);
+        collisionResultTri2Buffer.SetData(collisionresultsTri2);
+        collisionResultTriBuffer.SetData(collisionresultsTri);
 
         // BindGlobalPositions
         OctreeAabbCS.SetBuffer(bindPositionsKernel, "globalPositions", globalPositionsBuffer);
+
+        // BindGlobalPosTriangles
+        OctreeAabbCS.SetBuffer(bindPosTrianglesKernel, "globalPosTriangles", globalPosTrianglesBuffer);
 
         // findBBMinMaxKernel
         OctreeAabbCS.SetBuffer(findBBMinMaxKernel, "bbMinMax", bbMinMaxBuffer);
@@ -397,25 +404,34 @@ public class MultiGPUMSM : MonoBehaviour
         OctreeAabbCS.SetBuffer(checkCollisionL0Kernel, "bbOctree", bbOctreeBuffer); 
         OctreeAabbCS.SetBuffer(checkCollisionL0Kernel, "collisionResultL0", collisionResultsL0Buffer);
         OctreeAabbCS.SetBuffer(checkCollisionL0Kernel, "pairIndexL0", pairIndexL0Buffer);
-        OctreeAabbCS.SetBuffer(checkCollisionL0Kernel, "collisionPairResult", collisionPairBuffer);
-
         // CheckCollisionL1
         OctreeAabbCS.SetBuffer(checkCollisionL1Kernel, "pairIndexL1", pairIndexL1Buffer);
         OctreeAabbCS.SetBuffer(checkCollisionL1Kernel, "collisionResultL1", collisionResultsL1Buffer);
         OctreeAabbCS.SetBuffer(checkCollisionL1Kernel, "bbOctree", bbOctreeBuffer);
-        OctreeAabbCS.SetBuffer(checkCollisionL1Kernel, "collisionPairResult", collisionPairBuffer);
 
         // CheckCollisionL2
         OctreeAabbCS.SetBuffer(checkCollisionL2Kernel, "pairIndexL2", pairIndexL2Buffer);
         OctreeAabbCS.SetBuffer(checkCollisionL2Kernel, "collisionResultL2", collisionResultsL2Buffer);
         OctreeAabbCS.SetBuffer(checkCollisionL2Kernel, "bbOctree", bbOctreeBuffer);
-        OctreeAabbCS.SetBuffer(checkCollisionL2Kernel, "collisionPairResult", collisionPairBuffer);
 
+        OctreeAabbCS.SetBuffer(RemoveTriKernel, "collisionResultTri1", collisionResultTri1Buffer);
+        OctreeAabbCS.SetBuffer(RemoveTriKernel, "collisionResultTri2", collisionResultTri2Buffer);
+
+        // TriIntersection
+        OctreeAabbCS.SetBuffer(TriIntersectionKernel, "globalPosTriangles", globalPosTrianglesBuffer); 
+        OctreeAabbCS.SetBuffer(TriIntersectionKernel, "collisionResultTri1", collisionResultTri1Buffer); 
+        OctreeAabbCS.SetBuffer(TriIntersectionKernel, "collisionResultTri2", collisionResultTri2Buffer); 
+        OctreeAabbCS.SetBuffer(TriIntersectionKernel, "collisionResultTri", collisionResultTriBuffer); 
+        OctreeAabbCS.SetBuffer(TriIntersectionKernel, "pairIndexL0", pairIndexL0Buffer);
+        OctreeAabbCS.SetBuffer(TriIntersectionKernel, "bbOctree", bbOctreeBuffer);
+        OctreeAabbCS.SetBuffer(TriIntersectionKernel, "collisionResultL0", collisionResultsL0Buffer);
+        
     }
 
 
     private void Update()
     {
+        
         for (int i = 0; i < number_object; i++)
         {
             OctreeAabbCS.SetInt("objectIndex", i);
@@ -423,33 +439,45 @@ public class MultiGPUMSM : MonoBehaviour
 
             //if (deformableGPUMSM[i].GetPositionBuffer() != null) positionsBuffer.Release();
             positionsBuffer = deformableGPUMSM[i].GetPositionBuffer();
+            posTrianglesBuffer = deformableGPUMSM[i].GetPosTrianglesBuffer();
+            
+           
 
             //if (deformableGPUMSM[i].GetPositionBuffer() != null) positionsBuffer.Release();
             OctreeAabbCS.SetBuffer(bindPositionsKernel, "positions", positionsBuffer);
+            OctreeAabbCS.SetBuffer(bindPosTrianglesKernel, "posTriangles", posTrianglesBuffer);
 
 
             int numGroups_Pos = Mathf.CeilToInt(nodeCount / 1024f);
             OctreeAabbCS.Dispatch(bindPositionsKernel, numGroups_Pos, 1, 1);
+
+            int numGroups_Tri = Mathf.CeilToInt(triCount * number_object / 1024f);
+            OctreeAabbCS.Dispatch(bindPosTrianglesKernel, numGroups_Tri, numGroups_Tri, 1);
 
         }
 
         DispatchComputeShader();
 
 
-        GetData();
+        GetDataToCPU();
     }
 
     private void DispatchComputeShader()
     {
+
+
         OctreeAabbCS.Dispatch(findBBMinMaxKernel, Mathf.CeilToInt(number_object / 1024f), 1, 1);
-        OctreeAabbCS.Dispatch(implementOctreeKernel, Mathf.CeilToInt(number_object / 1024f)+1, 1, 1);
-        OctreeAabbCS.Dispatch(checkCollisionL0Kernel, Mathf.CeilToInt(pairIndexL0.Length / 1024f)+1, 1, 1);
-        OctreeAabbCS.Dispatch(checkCollisionL1Kernel, Mathf.CeilToInt(pairIndexL1.Length / 1024f)+1, 1, 1);
-        OctreeAabbCS.Dispatch(checkCollisionL2Kernel, Mathf.CeilToInt(pairIndexL2.Length / 1024f)+1, 1, 1);
-       
+        OctreeAabbCS.Dispatch(implementOctreeKernel, Mathf.CeilToInt(number_object / 1024f), 1, 1);
+        OctreeAabbCS.Dispatch(checkCollisionL0Kernel, Mathf.CeilToInt(pairIndexL0.Count/ 1024f), 1, 1);
+        OctreeAabbCS.Dispatch(checkCollisionL1Kernel, Mathf.CeilToInt(pairIndexL1.Count / 1024f), 1, 1);
+        OctreeAabbCS.Dispatch(checkCollisionL2Kernel, Mathf.CeilToInt(pairIndexL2.Count / 1024f), 1, 1);
+        
+        OctreeAabbCS.Dispatch(RemoveTriKernel, Mathf.CeilToInt(triCount * number_object / 1024f), 1, 1);
+        int numGroups_Tri =  Mathf.CeilToInt(triCount * number_object / 32);
+        OctreeAabbCS.Dispatch(TriIntersectionKernel, numGroups_Tri, numGroups_Tri, 1);       
     }
 
-    private void GetData()
+    private void GetDataToCPU()
     {
         if (debugModeData)
         bbOctreeBuffer.GetData(bbOctree);
@@ -458,6 +486,7 @@ public class MultiGPUMSM : MonoBehaviour
         collidablePairIndexL0.Clear();
         collidablePairIndexL1.Clear();
         collidablePairIndexL2.Clear();
+
 
         if (debugModeL0)
         {
@@ -485,11 +514,8 @@ public class MultiGPUMSM : MonoBehaviour
                 if (collisionresultsL1[i] == 1)
                 {
                     collidablePairIndexL1.Add(i);
-
                 }
-
             }
-
         }
 
         if (debugModeL2)
@@ -516,6 +542,16 @@ public class MultiGPUMSM : MonoBehaviour
             //print($"coll i {i} {collisionPairResults[i]}");
 
         //}
+        
+        // print(posTriangles.Length);
+        if(debugModeTriangle)
+        {
+            collisionResultTri1Buffer.GetData(collisionresultsTri1);
+            collisionResultTri2Buffer.GetData(collisionresultsTri2);
+           
+            globalPosTrianglesBuffer.GetData(posTriangles);
+        }
+
     }
 
 
@@ -562,16 +598,17 @@ public class MultiGPUMSM : MonoBehaviour
                 {
                     if (i == pairIndexL1[collidablePairIndexL1[p]].i1)
                     {
-                        Gizmos.DrawWireCube(bbOctree[i].center, (bbOctree[i].max - bbOctree[i].min));
+                        Gizmos.DrawWireCube(bbOctree[i].center, bbOctree[i].max - bbOctree[i].min);
 
                     }
 
                     if (i == pairIndexL1[collidablePairIndexL1[p]].i2)
                     {
-                        Gizmos.DrawWireCube(bbOctree[i].center, (bbOctree[i].max - bbOctree[i].min));
+                        Gizmos.DrawWireCube(bbOctree[i].center, bbOctree[i].max - bbOctree[i].min);
 
                     }
                 }
+                
                 
 
                 Gizmos.color = Color.blue;
@@ -579,18 +616,41 @@ public class MultiGPUMSM : MonoBehaviour
                 {
                     if (i == pairIndexL2[collidablePairIndexL2[p]].i1)
                     {
-                        Gizmos.DrawWireCube(bbOctree[i].center, (bbOctree[i].max - bbOctree[i].min));
+                        Gizmos.DrawWireCube(bbOctree[i].center, bbOctree[i].max - bbOctree[i].min);
 
                     }
 
                     if (i == pairIndexL2[collidablePairIndexL2[p]].i2)
                     {
-                        Gizmos.DrawWireCube(bbOctree[i].center, (bbOctree[i].max - bbOctree[i].min));
+                        Gizmos.DrawWireCube(bbOctree[i].center, bbOctree[i].max - bbOctree[i].min);
 
                     }
                 }
             } 
         }
+
+        if(debugModeTriangle)
+        if(posTriangles != null)
+        {
+            for (int c = 0; c < collisionresultsTri1.Length; c++)
+            {
+                if (collisionresultsTri1[c] == 1)  DrawTriangle(posTriangles[c], Color.green);                
+            }
+
+            for (int c = 0; c < collisionresultsTri2.Length; c++)
+            {
+                if (collisionresultsTri2[c] == 1)  DrawTriangle(posTriangles[c], Color.green);
+            }
+           
+        }
+    }
+
+    private void DrawTriangle(Tri triangle, Color color)
+    {
+        Gizmos.color = color;
+        Gizmos.DrawLine(triangle.vertex0, triangle.vertex1);
+        Gizmos.DrawLine(triangle.vertex1, triangle.vertex2);
+        Gizmos.DrawLine(triangle.vertex2, triangle.vertex0);
     }
 
 
@@ -603,7 +663,6 @@ public class MultiGPUMSM : MonoBehaviour
             bbMinMaxBuffer.Release();
             rangeObjIndexBuffer.Release();
             bbOctreeBuffer.Release();
-            collisionPairBuffer.Release();
             pairIndexL0Buffer.Release();
             pairIndexL1Buffer.Release();
             pairIndexL2Buffer.Release();

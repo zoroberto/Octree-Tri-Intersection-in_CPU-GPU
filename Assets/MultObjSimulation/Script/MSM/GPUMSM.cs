@@ -7,6 +7,7 @@ using System;
 using System.Linq;
 using UnityEngine.Rendering;
 using PBD;
+using UnityEditor;
 
 public class GPUMSM : MonoBehaviour
 {
@@ -16,6 +17,7 @@ public class GPUMSM : MonoBehaviour
     private GameObject[] collidableObjects;
 
     private int nodeCount;
+    private int triCount;
 
     private string modelName;
 
@@ -44,14 +46,17 @@ public class GPUMSM : MonoBehaviour
     private ComputeBuffer velocitiesBuffer ;
     private ComputeBuffer triangleBuffer ;
     private ComputeBuffer triPtrBuffer;
+    private ComputeBuffer triArrayBuffer;
 
     private ComputeBuffer floorBBBuffer ;
     private ComputeBuffer floorPositionsBuffer;
     private ComputeBuffer bbBoundingBuffer ;
     private ComputeBuffer floorCollisionResultBuffer ;
+    private ComputeBuffer posTrianglesBuffer ;
 
     private int updatePosKernel;
     private int computenormalKernel;
+    private int FindPosTrianglesKernel;
 
     private int findFloorMinMaxKernel;
     private int collisionWithFloorKernel;
@@ -76,9 +81,18 @@ public class GPUMSM : MonoBehaviour
         return nodeCount;
     }
 
+    public int getTriCount()
+    {
+        return triCount;
+    }
+
     public ComputeBuffer GetPositionBuffer()
     {
         return positionsBuffer;
+    }
+    public ComputeBuffer GetPosTrianglesBuffer()
+    {
+        return posTrianglesBuffer;
     }
 
     public void SetNumberObj(int numberObj)
@@ -130,6 +144,8 @@ public class GPUMSM : MonoBehaviour
 
 
         nodeCount = Positions.Length;
+        triCount = triangles.Count;
+
         Velocities = new Vector3[nodeCount];
         Velocities.Initialize();
 
@@ -163,13 +179,13 @@ public class GPUMSM : MonoBehaviour
             initTrianglePtr.Add(initTriangle.Count);
         }
 
-
-
         LoadTetModel.ClearData();
 
+        // print("t count: " + initTrianglePtr.Count);
+        // print("tri count: " + triangles.Count);
+        // print("triArray: " + triArray.Length);
         //print("node count: " + nodeCount);
         //print("springCounnt: " + springCount);
-        //print("Triangle: " + triCount);
 
     }
 
@@ -195,7 +211,6 @@ public class GPUMSM : MonoBehaviour
 
     private void setupComputeBuffer()
     {
-
         positionsBuffer = new ComputeBuffer(nodeCount, sizeof(float) * 3);
         positionsBuffer.SetData(Positions);
 
@@ -225,12 +240,15 @@ public class GPUMSM : MonoBehaviour
             initTrianglePtr.Add(initTriangle.Count);
         }
 
+
         triangleBuffer = new ComputeBuffer(initTriangle.Count, (sizeof(int) * 3));
         triangleBuffer.SetData(initTriangle.ToArray());
 
         triPtrBuffer = new ComputeBuffer(initTrianglePtr.Count, sizeof(int));
         triPtrBuffer.SetData(initTrianglePtr.ToArray());
 
+        triArrayBuffer = new ComputeBuffer(triArray.Length, sizeof(int));
+        triArrayBuffer.SetData(triArray);
 
         Vector3[] _floorVertices = collidableObjects[0].GetComponent<MeshFilter>().mesh.vertices;
         List<Vector3> floorVertices = new List<Vector3>();
@@ -252,24 +270,25 @@ public class GPUMSM : MonoBehaviour
 
         bbBoundingBuffer = new ComputeBuffer(1, sizeof(float) * 6);
         floorCollisionResultBuffer = new ComputeBuffer(1, sizeof(int));
+        posTrianglesBuffer = new ComputeBuffer(triCount, sizeof(float) * 9);
+
     }
 
     private void setupComputeShader()
     {
-        
         updatePosKernel = computeShaderObj.FindKernel("UpdatePosKernel");
         computenormalKernel = computeShaderObj.FindKernel("computenormalKernel");
+        FindPosTrianglesKernel = computeShaderObj.FindKernel("FindPosTriangles");
 
         findFloorMinMaxKernel = computeShaderObj.FindKernel("FindFloorMinMax");
         collisionWithFloorKernel = computeShaderObj.FindKernel("CollisionWithFloor");
         updateReverseVelocityKernel = computeShaderObj.FindKernel("UpdateReverseVelocity");
 
         computeShaderObj.SetInt("nodeCount", nodeCount);
+        computeShaderObj.SetInt("triCount", triCount);
         computeShaderObj.SetInt("numberObj", number_object);
-
         computeShaderObj.SetFloat("dt", dt);
        
-
         computeShaderObj.SetBuffer(updatePosKernel, "Positions", positionsBuffer);
         computeShaderObj.SetBuffer(updatePosKernel, "Velocities", velocitiesBuffer);
         computeShaderObj.SetBuffer(updatePosKernel, "vertsBuff", vertexBuffer); //passing to rendering
@@ -279,6 +298,10 @@ public class GPUMSM : MonoBehaviour
         computeShaderObj.SetBuffer(computenormalKernel, "Triangles", triangleBuffer);
         computeShaderObj.SetBuffer(computenormalKernel, "TrianglePtr", triPtrBuffer);
         computeShaderObj.SetBuffer(computenormalKernel, "vertsBuff", vertexBuffer); //passing to rendering
+
+        computeShaderObj.SetBuffer(FindPosTrianglesKernel, "posTriangles", posTrianglesBuffer);
+        computeShaderObj.SetBuffer(FindPosTrianglesKernel, "Positions", positionsBuffer);
+        computeShaderObj.SetBuffer(FindPosTrianglesKernel, "triArray", triArrayBuffer);
 
         // FindFloorMinMax
         computeShaderObj.SetBuffer(findFloorMinMaxKernel, "floorPositions", floorPositionsBuffer);
@@ -317,12 +340,11 @@ public class GPUMSM : MonoBehaviour
         //for (int i = 0; i < speed; i++)
         {
 
-
-
             computeShaderObj.Dispatch(updatePosKernel, Mathf.CeilToInt(nodeCount / 1024.0f), 1, 1);
         }
 
         computeShaderObj.Dispatch(computenormalKernel, Mathf.CeilToInt(nodeCount / 1024.0f), 1, 1);
+        computeShaderObj.Dispatch(FindPosTrianglesKernel, Mathf.CeilToInt(triCount / 1024.0f), 1, 1);
 
 
         computeShaderObj.Dispatch(collisionWithFloorKernel, 1, 1, 1);
@@ -330,14 +352,16 @@ public class GPUMSM : MonoBehaviour
 
     }
 
+   
     private void OnDestroy()
     {
-        if (this.enabled)
+        if (enabled)
         {
 
             vertexBuffer.Dispose();
             triBuffer.Dispose();
             positionsBuffer.Dispose();
+            posTrianglesBuffer.Dispose();
             velocitiesBuffer.Dispose();
             triangleBuffer.Dispose();
             triPtrBuffer.Dispose();
